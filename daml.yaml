@@ -1,0 +1,15 @@
+sdk-version: 0.13.51
+name: daml-rock-paper-scissors
+version: 1.0.0
+source: daml/RockPaperScissorsV1.daml
+scenario: RockPaperScissorsV1:setup
+parties:
+- Alice
+- Bob
+- Charlie
+- GameMaker
+exposed-modules:
+- Main
+dependencies:
+- daml-prim
+- daml-stdlib

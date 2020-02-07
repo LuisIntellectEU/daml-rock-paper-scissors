@@ -1,0 +1,182 @@
+-- Copyright (c) 2020 The DAML Authors. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+daml 1.2
+module RockPaperScissorsV1 where
+
+import DA.List
+
+type GameSetupId = ContractId GameSetup
+type RockPaperScissorsBidRequestId = ContractId RockPaperScissorsBidRequest
+type RockPaperScissorsBidId = ContractId RockPaperScissorsBid
+type RockPaperScissorsResultId = ContractId RockPaperScissorsResult
+
+data BidOption = ROCK | PAPER | SCISSORS
+  deriving (Eq, Show)
+data GameResult = PLAYER1_WIN | PLAYER2_WIN | TIE
+  deriving (Eq, Show)
+
+rockPaperScissorsResult : BidOption -> BidOption -> GameResult
+rockPaperScissorsResult bid1 bid2
+  | (bid1 == ROCK && bid2 == SCISSORS) || (bid1 == SCISSORS && bid2 == PAPER) || (bid1 == PAPER && bid2 == ROCK) = 
+    PLAYER1_WIN
+  | (bid2 == ROCK && bid1 == SCISSORS) || (bid2 == SCISSORS && bid1 == PAPER) || (bid2 == PAPER && bid1 == ROCK) = 
+    PLAYER2_WIN
+  | otherwise = 
+    TIE
+
+template GameSetup
+  with
+    players : [Party]
+    gameMaker : Party
+    alreadySigned : [Party]
+  where
+    signatory alreadySigned, gameMaker
+    observer players
+    ensure
+      -- Can't have duplicate signatories and more than 2 players
+      unique alreadySigned && length players < 3 
+
+    -- The parties who need to sign are the players with alreadySigned filtered out
+    let toSign = filter (`notElem` alreadySigned) players
+
+    choice Sign : GameSetupId
+      with
+        player : Party
+      controller player
+        do
+          -- Check the controller is in the toSign list, and if they are, sign the GameSetup contract
+          assert (player `elem` toSign)
+          create this with alreadySigned = player :: alreadySigned
+    choice Unsign : GameSetupId
+      with
+        player : Party
+      controller player
+        do
+          -- Check the controller is in the alreadySigned list, and if they are, unsign/revoke the GameSetup contract
+          assert (player `elem` alreadySigned)
+          create this with alreadySigned = delete player alreadySigned
+    controller gameMaker can
+      nonconsuming RequestBids : (RockPaperScissorsBidRequestId, RockPaperScissorsBidRequestId)
+        do
+          -- Check that all the required signatories have signed GameSetup
+          assert (sort alreadySigned == sort players)
+          rpsBidRequest1 <- create RockPaperScissorsBidRequest with 
+            bidder = head players
+            gameMaker
+            opponent = players !! 1
+          rpsBidRequest2 <- create RockPaperScissorsBidRequest with 
+            bidder = players !! 1
+            gameMaker
+            opponent = head players
+          return (rpsBidRequest1, rpsBidRequest2)
+      MatchBids : ()
+        with
+          bid1Cid : RockPaperScissorsBidId
+          bid2Cid : RockPaperScissorsBidId
+        do
+          -- Check that all the required signatories have signed GameSetup
+          bid1 <- fetch bid1Cid
+          bid2 <- fetch bid2Cid
+          assert (bid1.bidder == bid2.opponent && bid2.bidder == bid1.opponent)
+          let   
+            result = (rockPaperScissorsResult bid1.bid bid2.bid)
+          rpsResultCid <- create RockPaperScissorsResult with player1 = bid1.bidder; player2 = bid2.bidder; gameMaker; result
+          archive bid1Cid
+          archive bid2Cid
+      AddPlayer : GameSetupId
+        with 
+          player : Party
+        do
+          --assert ()
+          create this with players = player :: players
+      RemovePlayer : GameSetupId
+        with
+          player : Party
+        do
+          create this with players = delete player players
+
+template RockPaperScissorsBidRequest
+  with
+    bidder : Party
+    gameMaker : Party
+    opponent : Party
+  where
+    signatory gameMaker, bidder
+    controller bidder can
+      ExecuteBid : RockPaperScissorsBidId
+        with
+          bid : BidOption
+        do
+          create RockPaperScissorsBid with bidder; gameMaker; opponent; bid
+
+template RockPaperScissorsBid
+  with
+    bidder : Party
+    gameMaker : Party
+    opponent : Party
+    bid : BidOption
+  where
+    signatory gameMaker, bidder
+
+template RockPaperScissorsResult
+  with 
+    player1 : Party
+    player2 : Party
+    gameMaker : Party
+    result : GameResult
+  where
+    signatory gameMaker, player1, player2
+
+setup = scenario do
+  alice <- getParty "Alice"
+  bob <- getParty "Bob"
+  charlie <- getParty "Charlie"
+  gameMaker <- getParty "GameMaker"
+  
+  gameSetupCid <- submit gameMaker do
+    create GameSetup with
+      players = []
+      gameMaker = gameMaker
+      alreadySigned = []
+      
+  gameSetupCid <- submit gameMaker do
+    exercise gameSetupCid AddPlayer with 
+      player = alice
+
+  gameSetupCid <- submit gameMaker do
+    exercise gameSetupCid AddPlayer with 
+      player = bob
+  
+  submitMustFail gameMaker do
+    exercise gameSetupCid AddPlayer with 
+      player = charlie
+  
+  gameSetupCid <- submit gameMaker do
+    exercise gameSetupCid RemovePlayer with 
+      player = bob
+  
+  gameSetupCid <- submit gameMaker do
+    exercise gameSetupCid AddPlayer with 
+      player = charlie
+
+  gameSetupCid <- submit alice do
+    exercise gameSetupCid Sign with 
+      player = alice
+
+  gameSetupCid <- submit charlie do
+    exercise gameSetupCid Sign with player = charlie
+  
+  (requestBid1Cid, requestBid2Cid) <- submit gameMaker do
+    exercise gameSetupCid RequestBids
+
+  bid1Cid <- submit charlie do
+    exercise requestBid1Cid ExecuteBid with bid = PAPER
+
+  bid2Cid <- submit alice do
+    exercise requestBid2Cid ExecuteBid with bid = ROCK
+  
+  submit gameMaker do
+    exercise gameSetupCid MatchBids with bid1Cid; bid2Cid
+
+  return ()
